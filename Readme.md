@@ -21,11 +21,17 @@ https://www.nuget.org/packages/Microsoft.SharePointOnline.CSOM
 ## How to Run - parameters
 
 -siteUrl ... Target site collection (site) or site (web) URL.
+
 -listName ... Target List Name (Title)
+
 -username ... Site Administrator Account to check the workflow instances.
+
 -password ... The password of the above user.
+
 -output   ... [optional] When parameter is specified console ouput is saved to file instead.
+
 -resume   ... [optional] When resume is set to $true, the suspended workflows are resumed when detected.
+
 
 #### Example 1: Displaying all the workflow instances and their states
 .\GetSP2013WfStatusForList.ps1 -siteUrl https://tenant.sharepoint.com/sites/wf -listName customlist -username admin@tenant.onmicrosoft.com -password PASSWORD
