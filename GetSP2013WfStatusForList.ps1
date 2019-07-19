@@ -14,57 +14,92 @@ Please note: None of the conditions outlined in the disclaimer above will superc
              the Premier Customer Services Description.
 #>
 param(
- $siteUrl,
- $listName,
- $username,
- $password,
- $outfile,
- $resume = $false
+  [Parameter(Mandatory=$true)]
+  $siteUrl,
+  [Parameter(Mandatory=$true)]
+  $listName,
+  $username,
+  $password,
+  $outfile,
+  $resume = $false
 )
 
 Add-Type -Path "C:\Program Files\Common Files\microsoft shared\Web Server Extensions\16\ISAPI\Microsoft.SharePoint.Client.dll"
 Add-Type -Path "C:\Program Files\Common Files\microsoft shared\Web Server Extensions\16\ISAPI\Microsoft.SharePoint.Client.Runtime.dll"
 Add-Type -Path "C:\Program Files\Common Files\microsoft shared\Web Server Extensions\16\ISAPI\Microsoft.SharePoint.Client.WorkflowServices.dll"
 
-function ExecuteQueryWithIncrementalRetry($retryCount, $delay)
+$script:context = new-object Microsoft.SharePoint.Client.ClientContext($siteUrl)
+$pwd = $null
+if ($username -eq $null)
 {
+  $cred = Get-Credential
+  $username = $cred.UserName
+  $pwd = $cred.Password
+}
+else
+{
+  $pwd = convertto-securestring $password -AsPlainText -Force
+}
+$credentials = New-Object Microsoft.SharePoint.Client.SharePointOnlineCredentials($username, $pwd)
+$script:context.Credentials = $credentials
+
+
+$script:context.add_ExecutingWebRequest({
+  param ($source, $eventArgs);
+  $request = $eventArgs.WebRequestExecutor.WebRequest;
+  $request.UserAgent = "NONISV|Contoso|Application/1.0";
+})
+
+function ExecuteQueryWithIncrementalRetry {
+  param (
+      [parameter(Mandatory = $true)]
+      [int]$retryCount
+  );
+
+  $DefaultRetryAfterInMs = 120000;
+  $RetryAfterHeaderName = "Retry-After";
   $retryAttempts = 0;
-  $backoffInterval = $delay;
-  if ($retryCount -le 0)
-  {
-    throw "Provide a retry count greater than zero."
+
+  if ($retryCount -le 0) {
+      throw "Provide a retry count greater than zero."
   }
-  if ($delay -le 0)
-  {
-    throw "Provide a delay greater than zero."
-  }
-  while ($retryAttempts -lt $retryCount)
-  {
-    try
-    {
-      $script:context.ExecuteQuery();
-      return;
-    }
-    catch [System.Net.WebException]
-    {
-      $response = $_.Exception.Response
-      if ($response -ne $null -and $response.StatusCode -eq 429)
-      {
-        Write-Host ("CSOM request exceeded usage limits. Sleeping for {0} seconds before retrying." -F ($backoffInterval/1000))
-        #Add delay.
-        Start-Sleep -m $backoffInterval
-        #Add to retry count and increase delay.
-        $retryAttempts++;
-        $backoffInterval = $backoffInterval * 2;
+
+  while ($retryAttempts -lt $retryCount) {
+      try {
+          $script:context.ExecuteQuery();
+          return;
       }
-      else
-      {
-        throw;
+      catch [System.Net.WebException] {
+          $response = $_.Exception.Response
+
+          if (($null -ne $response) -and (($response.StatusCode -eq 429) -or ($response.StatusCode -eq 503))) {
+              $retryAfterHeader = $response.GetResponseHeader($RetryAfterHeaderName);
+              $retryAfterInMs = $DefaultRetryAfterInMs;
+
+              if (-not [string]::IsNullOrEmpty($retryAfterHeader)) {
+                  if (-not [int]::TryParse($retryAfterHeader, [ref]$retryAfterInMs)) {
+                      $retryAfterInMs = $DefaultRetryAfterInMs;
+                  }
+                  else {
+                      $retryAfterInMs *= 1000;
+                  }
+              }
+
+              Write-Output ("CSOM request exceeded usage limits. Sleeping for {0} seconds before retrying." -F ($retryAfterInMs / 1000))
+              #Add delay.
+              Start-Sleep -m $retryAfterInMs
+              #Add to retry count.
+              $retryAttempts++;
+          }
+          else {
+              throw;
+          }
       }
-    }
   }
+
   throw "Maximum retry attempts {0}, have been attempted." -F $retryCount;
 }
+
 
 function EnumWorkflowsInFolder($list, $ServerRelativeUrl)
 {
@@ -79,20 +114,20 @@ function EnumWorkflowsInFolder($list, $ServerRelativeUrl)
     }
     $listItems = $list.GetItems($camlQuery);
     $script:context.Load($listItems);
-    ExecuteQueryWithIncrementalRetry -retryCount 5 -delay 30000
+    ExecuteQueryWithIncrementalRetry -retryCount 5 
 
     foreach($listItem in $listItems)
     {
       if ($listItem.FileSystemObjectType -eq [Microsoft.SharePoint.Client.FileSystemObjectType]::Folder)
       {
          $script:context.Load($listItem.Folder)
-         ExecuteQueryWithIncrementalRetry -retryCount 5 -delay 30000
+         ExecuteQueryWithIncrementalRetry -retryCount 5 
          EnumWorkflowsInFolder -List $list -ServerRelativeUrl $listItem.Folder.ServerRelativeUrl
       }
 
       $wfic = $script:wfis.EnumerateInstancesForListItem($list.Id, $listItem.Id);
       $script:context.Load($wfic);
-      ExecuteQueryWithIncrementalRetry -retryCount 5 -delay 30000
+      ExecuteQueryWithIncrementalRetry -retryCount 5 
  
       foreach ($wfi in $wfic)
       {
@@ -102,7 +137,7 @@ function EnumWorkflowsInFolder($list, $ServerRelativeUrl)
             if ($wfi.Status -eq "Suspended")
             {
                 $script:wfis.ResumeWorkflow($wfi)
-                ExecuteQueryWithIncrementalRetry -retryCount 5 -delay 30000
+                ExecuteQueryWithIncrementalRetry -retryCount 5 
                 Write-Output ("Resumed workflow on Item ID = " + $listItem.Id.ToString())
             }
         }
@@ -119,7 +154,7 @@ function GetWorkflowSubscription($subid)
   {    
     $sub = $script:wfss.GetSubscription($subid)
     $script:context.Load($sub)
-    ExecuteQueryWithIncrementalRetry -retryCount 5 -delay 30000
+    ExecuteQueryWithIncrementalRetry -retryCount 5 
 
     $script:wfsubhash[$subid.ToString()] = $sub.Name
     return $sub.Name
@@ -149,10 +184,6 @@ function WriteOut($text, $append)
   }
 }
 
-$script:context = new-object Microsoft.SharePoint.Client.ClientContext($siteUrl)
-$pwd = convertto-securestring $password -AsPlainText -Force
-$credentials = New-Object Microsoft.SharePoint.Client.SharePointOnlineCredentials($username, $pwd)
-$script:context.Credentials = $credentials
 
 $wfsm = new-object Microsoft.SharePoint.Client.WorkflowServices.WorkflowServicesManager($script:context, $script:context.Web)
 $script:wfss = $wfsm.GetWorkflowSubscriptionService();
@@ -161,11 +192,11 @@ $script:wfis = $wfsm.GetWorkflowInstanceService();
 
 $list = $script:context.Web.Lists.GetByTitle($listName)
 $script:context.Load($list)
-ExecuteQueryWithIncrementalRetry -retryCount 5 -delay 30000
+ExecuteQueryWithIncrementalRetry -retryCount 5 
 
 $wfSubs = $wfss.EnumerateSubscriptionsByList($list.Id);
 $script:context.Load($wfSubs);
-ExecuteQueryWithIncrementalRetry -retryCount 5 -delay 30000
+ExecuteQueryWithIncrementalRetry -retryCount 5 
 
 WriteOut -text "ItemId,WorkflowName,Status" 
 EnumWorkflowsInFolder -List $list -serverRelativeUrl $null
